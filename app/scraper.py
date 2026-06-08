@@ -1,61 +1,37 @@
-import asyncio
-import random
-from contextlib import asynccontextmanager
+import re
 from typing import Any
+from urllib.parse import urlencode
 
-from playwright.async_api import Browser, async_playwright
+import httpx
 
 from app.config import get_settings
 
-STEALTH_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
-)
-STEALTH_VIEWPORT = {"width": 1920, "height": 1080}
-STEALTH_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
-
-_playwright = None
-_browser: Browser | None = None
-_browser_lock = asyncio.Lock()
+_TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
-async def _get_browser() -> Browser:
-    global _playwright, _browser
+def _extract_title(html: str) -> str:
+    match = _TITLE_PATTERN.search(html)
+    if not match:
+        return ""
 
-    async with _browser_lock:
-        if _browser is None or not _browser.is_connected():
-            _playwright = await async_playwright().start()
-            settings = get_settings()
-            _browser = await _playwright.chromium.launch(
-                headless=settings.playwright_headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--single-process",
-                ],
-            )
-
-    return _browser
+    return re.sub(r"\s+", " ", match.group(1)).strip()
 
 
-@asynccontextmanager
-async def _page_context():
-    browser = await _get_browser()
+def _build_crawlbase_url(target_url: str) -> str:
     settings = get_settings()
-    context = await browser.new_context(
-        user_agent=STEALTH_USER_AGENT,
-        viewport=STEALTH_VIEWPORT,
-        extra_http_headers=STEALTH_HEADERS,
-    )
-    page = await context.new_page()
-    page.set_default_timeout(settings.scrape_timeout_ms)
+    if not settings.crawlbase_token:
+        raise RuntimeError("CRAWLBASE_TOKEN is not configured")
 
-    try:
-        yield page
-    finally:
-        await context.close()
+    query = urlencode(
+        {
+            "token": settings.crawlbase_token,
+            "url": target_url,
+            "javascript": "true",
+            "page_wait": "5000",
+            "country": "US",
+        }
+    )
+    return f"{settings.crawlbase_api_url.rstrip('/')}/?{query}"
 
 
 async def scrape_url(
@@ -64,33 +40,30 @@ async def scrape_url(
     wait_until: str = "networkidle",
     selector: str | None = None,
 ) -> dict[str, Any]:
-    async with _page_context() as page:
-        response = await page.goto(url, wait_until="domcontentloaded")
-        await asyncio.sleep(random.uniform(2.0, 4.0))
-        if response is None:
-            raise RuntimeError(f"Failed to load page: {url}")
+    del wait_until, selector  # Crawlbase handles rendering server-side.
 
-        if selector:
-            await page.wait_for_selector(selector)
+    settings = get_settings()
+    api_url = _build_crawlbase_url(url)
 
-        title = await page.title()
-        content = await page.content()
+    async with httpx.AsyncClient(
+        timeout=settings.crawlbase_timeout_s,
+        follow_redirects=True,
+    ) as client:
+        response = await client.get(api_url)
 
-        return {
-            "url": page.url,
-            "status": response.status,
-            "title": title,
-            "html": content,
-        }
+    html = response.text
+    pc_status = int(response.headers.get("pc_status", response.status_code))
+    original_status = int(response.headers.get("original_status", pc_status))
+    final_url = response.headers.get("url", url)
 
+    if pc_status != 200:
+        raise RuntimeError(
+            f"Crawlbase request failed with pc_status={pc_status}: {html[:500]}"
+        )
 
-async def close_browser() -> None:
-    global _playwright, _browser
-
-    async with _browser_lock:
-        if _browser is not None:
-            await _browser.close()
-            _browser = None
-        if _playwright is not None:
-            await _playwright.stop()
-            _playwright = None
+    return {
+        "url": final_url,
+        "status": original_status,
+        "title": _extract_title(html),
+        "html": html,
+    }

@@ -1,4 +1,3 @@
-from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -6,19 +5,11 @@ from mangum import Mangum
 from pydantic import BaseModel, Field, HttpUrl
 
 from app.middleware import RapidApiSecretMiddleware
-from app.scraper import close_browser, scrape_url
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    yield
-    await close_browser()
-
+from app.scraper import scrape_url
 
 app = FastAPI(
-    title="Lambda Playwright Scraper",
-    version="1.0.0",
-    lifespan=lifespan,
+    title="Lambda Crawlbase Scraper",
+    version="2.0.0",
 )
 app.add_middleware(RapidApiSecretMiddleware)
 
