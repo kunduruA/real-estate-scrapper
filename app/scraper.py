@@ -1,10 +1,18 @@
 import asyncio
+import random
 from contextlib import asynccontextmanager
 from typing import Any
 
-from playwright.async_api import Browser, Page, async_playwright
+from playwright.async_api import Browser, async_playwright
 
 from app.config import get_settings
+
+STEALTH_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+)
+STEALTH_VIEWPORT = {"width": 1920, "height": 1080}
+STEALTH_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
 
 _playwright = None
 _browser: Browser | None = None
@@ -36,13 +44,18 @@ async def _get_browser() -> Browser:
 async def _page_context():
     browser = await _get_browser()
     settings = get_settings()
-    page = await browser.new_page()
+    context = await browser.new_context(
+        user_agent=STEALTH_USER_AGENT,
+        viewport=STEALTH_VIEWPORT,
+        extra_http_headers=STEALTH_HEADERS,
+    )
+    page = await context.new_page()
     page.set_default_timeout(settings.scrape_timeout_ms)
 
     try:
         yield page
     finally:
-        await page.close()
+        await context.close()
 
 
 async def scrape_url(
@@ -52,7 +65,8 @@ async def scrape_url(
     selector: str | None = None,
 ) -> dict[str, Any]:
     async with _page_context() as page:
-        response = await page.goto(url, wait_until=wait_until)
+        response = await page.goto(url, wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(2.0, 4.0))
         if response is None:
             raise RuntimeError(f"Failed to load page: {url}")
 
